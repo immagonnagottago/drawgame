@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sketchworld</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #ui {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      font-size: 11px;
+      color: #444;
+      line-height: 1.8;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    #game-canvas {
+      display: block;
+      border: 1px solid #111;
+    }
+
+    /* ── DRAW OVERLAY ── */
+    #draw-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.92);
+      z-index: 100;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+    }
+    #draw-overlay.active { display: flex; }
+
+    #draw-prompt {
+      font-size: 13px;
+      color: #666;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+
+    #draw-name {
+      font-size: 28px;
+      color: #fff;
+      letter-spacing: 0.05em;
+    }
+
+    #draw-canvas {
+      border: 1px solid #222;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    #draw-controls {
+      display: flex;
+      gap: 12px;
+    }
+
+    .btn {
+      background: none;
+      border: 1px solid #333;
+      color: #888;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      padding: 8px 20px;
+      cursor: pointer;
+      text-transform: uppercase;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn:hover { border-color: #fff; color: #fff; }
+    .btn.primary { border-color: #fff; color: #fff; }
+    .btn.primary:hover { background: #fff; color: #000; }
+
+    #draw-hint {
+      font-size: 10px;
+      color: #333;
+      letter-spacing: 0.1em;
+    }
+  </style>
+</head>
+<body>
+
+<div id="ui">
+  WASD / ARROWS — move<br>
+  step on ? to discover
+</div>
+
+<canvas id="game-canvas"></canvas>
+
+<!-- DRAW OVERLAY -->
+<div id="draw-overlay">
+  <div id="draw-prompt">you've never seen one before. draw it.</div>
+  <div id="draw-name"></div>
+  <canvas id="draw-canvas" width="400" height="400"></canvas>
+  <div id="draw-controls">
+    <button class="btn" id="btn-undo">undo</button>
+    <button class="btn" id="btn-clear">clear</button>
+    <button class="btn primary" id="btn-done">done</button>
+  </div>
+  <div id="draw-hint">white lines · transparent fill · black background</div>
+</div>
+
+<script>
+// ── CONFIG ──────────────────────────────────────────────────────────────────
+const TILE  = 32;
+const COLS  = 25;
+const ROWS  = 18;
+const W     = TILE * COLS;
+const H     = TILE * ROWS;
+
+const THINGS = [
+  'rat', 'goblin', 'chest', 'mushroom', 'well',
+  'scarecrow', 'stone', 'campfire', 'gate', 'rune'
+];
+
+// ── CANVAS SETUP ────────────────────────────────────────────────────────────
+const gc  = document.getElementById('game-canvas');
+const ctx = gc.getContext('2d');
+gc.width  = W;
+gc.height = H;
+
+// ── STATE ────────────────────────────────────────────────────────────────────
+const drawings = {};   // thing name → ImageData (or null)
+const world    = [];   // [row][col] = { thing: string|null, discovered: bool }
+let   player   = { x: 12, y: 8 };
+let   pending  = null; // thing name waiting to be drawn
+let   keys     = {};
+
+// Build world grid
+for (let r = 0; r < ROWS; r++) {
+  world[r] = [];
+  for (let c = 0; c < COLS; c++) {
+    world[r][c] = { thing: null, discovered: false };
+  }
+}
+
+// Scatter things
+function scatter() {
+  const pool = [...THINGS, ...THINGS, ...THINGS]; // duplicates ok
+  for (let i = 0; i < 28; i++) {
+    const r = 1 + Math.floor(Math.random() * (ROWS - 2));
+    const c = 1 + Math.floor(Math.random() * (COLS - 2));
+    if (r === player.y && c === player.x) continue;
+    world[r][c].thing = pool[Math.floor(Math.random() * pool.length)];
+  }
+}
+scatter();
+
+// ── DRAW SYSTEM ─────────────────────────────────────────────────────────────
+const dc    = document.getElementById('draw-canvas');
+const dctx  = dc.getContext('2d');
+let   strokes    = [];
+let   current    = null;
+let   isDrawing  = false;
+
+function clearDrawCanvas() {
+  dctx.fillStyle = '#000';
+  dctx.fillRect(0, 0, dc.width, dc.height);
+}
+
+function redrawStrokes() {
+  clearDrawCanvas();
+  dctx.strokeStyle = '#fff';
+  dctx.lineWidth   = 2;
+  dctx.lineCap     = 'round';
+  dctx.lineJoin    = 'round';
+  for (const stroke of strokes) {
+    if (stroke.length < 2) continue;
+    dctx.beginPath();
+    dctx.moveTo(stroke[0].x, stroke[0].y);
+    for (let i = 1; i < stroke.length; i++) dctx.lineTo(stroke[i].x, stroke[i].y);
+    dctx.stroke();
+  }
+}
+
+function pos(e) {
+  const r = dc.getBoundingClientRect();
+  const src = e.touches ? e.touches[0] : e;
+  return { x: src.clientX - r.left, y: src.clientY - r.top };
+}
+
+dc.addEventListener('pointerdown', e => {
+  isDrawing = true;
+  current = [pos(e)];
+  dc.setPointerCapture(e.pointerId);
+});
+dc.addEventListener('pointermove', e => {
+  if (!isDrawing) return;
+  current.push(pos(e));
+  redrawStrokes();
+  // draw current stroke live
+  dctx.strokeStyle = '#fff';
+  dctx.lineWidth   = 2;
+  dctx.lineCap     = 'round';
+  dctx.lineJoin    = 'round';
+  dctx.beginPath();
+  dctx.moveTo(current[0].x, current[0].y);
+  for (let i = 1; i < current.length; i++) dctx.lineTo(current[i].x, current[i].y);
+  dctx.stroke();
+});
+dc.addEventListener('pointerup', () => {
+  if (current && current.length) strokes.push(current);
+  current   = null;
+  isDrawing = false;
+  redrawStrokes();
+});
+
+document.getElementById('btn-undo').addEventListener('click', () => {
+  strokes.pop();
+  redrawStrokes();
+});
+document.getElementById('btn-clear').addEventListener('click', () => {
+  strokes = [];
+  clearDrawCanvas();
+});
+document.getElementById('btn-done').addEventListener('click', () => {
+  // Save drawing as ImageData
+  if (pending) {
+    drawings[pending] = dctx.getImageData(0, 0, dc.width, dc.height);
+  }
+  closeDrawOverlay();
+});
+
+function openDrawOverlay(name) {
+  pending = name;
+  strokes = [];
+  clearDrawCanvas();
+  document.getElementById('draw-name').textContent = name;
+  document.getElementById('draw-overlay').classList.add('active');
+}
+
+function closeDrawOverlay() {
+  document.getElementById('draw-overlay').classList.remove('active');
+  pending = null;
+  render();
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => { keys[e.key] = true; });
+document.addEventListener('keyup',   e => { keys[e.key] = false; });
+
+let lastMove = 0;
+function handleInput(ts) {
+  if (document.getElementById('draw-overlay').classList.contains('active')) return;
+  if (ts - lastMove < 140) return;
+
+  let nx = player.x, ny = player.y;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) ny--;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) ny++;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) nx--;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) nx++;
+
+  if (nx === player.x && ny === player.y) return;
+  if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) return;
+
+  player.x = nx;
+  player.y = ny;
+  lastMove  = ts;
+
+  const cell = world[ny][nx];
+  if (cell.thing && !cell.discovered) {
+    cell.discovered = true;
+    if (!drawings[cell.thing]) {
+      openDrawOverlay(cell.thing);
+    }
+  }
+}
+
+// ── RENDER ───────────────────────────────────────────────────────────────────
+function render() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid (faint)
+  ctx.strokeStyle = '#0a0a0a';
+  ctx.lineWidth = 1;
+  for (let c = 0; c <= COLS; c++) {
+    ctx.beginPath(); ctx.moveTo(c*TILE, 0); ctx.lineTo(c*TILE, H); ctx.stroke();
+  }
+  for (let r = 0; r <= ROWS; r++) {
+    ctx.beginPath(); ctx.moveTo(0, r*TILE); ctx.lineTo(W, r*TILE); ctx.stroke();
+  }
+
+  // Entities
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cell = world[r][c];
+      if (!cell.thing) continue;
+      const cx = c * TILE + TILE/2;
+      const cy = r * TILE + TILE/2;
+
+      if (!cell.discovered) {
+        // Unknown — show "?"
+        ctx.font      = '14px Courier New';
+        ctx.fillStyle = '#222';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('?', cx, cy);
+      } else if (drawings[cell.thing]) {
+        // Draw stored sketch, scaled to tile, transparent
+        const img = drawings[cell.thing];
+        // Render to offscreen, then draw scaled
+        const off = document.createElement('canvas');
+        off.width  = img.width;
+        off.height = img.height;
+        off.getContext('2d').putImageData(img, 0, 0);
+        // Draw with globalCompositeOperation to preserve transparency feel
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        const pad = 4;
+        ctx.drawImage(off, c*TILE+pad, r*TILE+pad, TILE-pad*2, TILE-pad*2);
+        ctx.restore();
+      } else {
+        // Discovered but no drawing yet (shouldn't happen in normal flow)
+        ctx.font      = '10px Courier New';
+        ctx.fillStyle = '#333';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(cell.thing[0].toUpperCase(), cx, cy);
+      }
+    }
+  }
+
+  // Player — simple white dot with crosshair feel
+  const px = player.x * TILE + TILE/2;
+  const py = player.y * TILE + TILE/2;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.arc(px, py, 6, 0, Math.PI*2);
+  ctx.stroke();
+  // small cross
+  ctx.beginPath();
+  ctx.moveTo(px-4, py); ctx.lineTo(px+4, py);
+  ctx.moveTo(px, py-4); ctx.lineTo(px, py+4);
+  ctx.stroke();
+}
+
+// ── LOOP ─────────────────────────────────────────────────────────────────────
+function loop(ts) {
+  handleInput(ts);
+  render();
+  requestAnimationFrame(loop);
+}
+
+clearDrawCanvas();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
