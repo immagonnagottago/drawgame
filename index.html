@@ -89,6 +89,7 @@
 const TILE  = 80;
 const COLS  = 40;
 const ROWS  = 30;
+const DRAW_SIZE = 400; // draw canvas resolution
 
 const THINGS = [
   'rat', 'goblin', 'chest', 'mushroom', 'well',
@@ -106,7 +107,8 @@ window.addEventListener('resize', () => {
 });
 
 // ── WORLD STATE ──────────────────────────────────────────────────────────────
-const drawings = {};   // name → offscreen HTMLCanvasElement
+// drawings[name] = array of strokes, each stroke = array of {x,y} in 0..1 (normalised)
+const drawings = {};
 const world    = [];
 let player     = { x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) };
 let pending    = null;
@@ -132,34 +134,45 @@ for (let r = 0; r < ROWS; r++) {
 const dc      = document.getElementById('draw-canvas');
 const dctx    = dc.getContext('2d');
 const overlay = document.getElementById('draw-overlay');
-let strokes   = [];
+let strokes   = [];   // current session strokes (normalised 0..1)
 let curStroke = null;
 let isDrawing = false;
 
 function clearDraw() {
   dctx.fillStyle = '#000';
-  dctx.fillRect(0, 0, dc.width, dc.height);
+  dctx.fillRect(0, 0, DRAW_SIZE, DRAW_SIZE);
 }
 
-function redrawStrokes() {
-  clearDraw();
-  dctx.strokeStyle = '#fff';
-  dctx.lineWidth   = 2;
-  dctx.lineCap     = 'round';
-  dctx.lineJoin    = 'round';
-  for (const s of strokes) {
+// Render strokes (normalised) onto a canvas context at given pixel size
+function renderStrokes(strokeList, targetCtx, size, lineWidth) {
+  targetCtx.strokeStyle = '#fff';
+  targetCtx.lineWidth   = lineWidth;
+  targetCtx.lineCap     = 'round';
+  targetCtx.lineJoin    = 'round';
+  for (const s of strokeList) {
     if (s.length < 2) continue;
-    dctx.beginPath();
-    dctx.moveTo(s[0].x, s[0].y);
-    for (let i = 1; i < s.length; i++) dctx.lineTo(s[i].x, s[i].y);
-    dctx.stroke();
+    targetCtx.beginPath();
+    targetCtx.moveTo(s[0].x * size, s[0].y * size);
+    for (let i = 1; i < s.length; i++) {
+      targetCtx.lineTo(s[i].x * size, s[i].y * size);
+    }
+    targetCtx.stroke();
   }
+}
+
+function redrawDrawCanvas() {
+  clearDraw();
+  renderStrokes(strokes, dctx, DRAW_SIZE, 3);
 }
 
 function getPos(e) {
   const rect = dc.getBoundingClientRect();
   const src  = e.touches ? e.touches[0] : e;
-  return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+  // normalise to 0..1
+  return {
+    x: (src.clientX - rect.left)  / DRAW_SIZE,
+    y: (src.clientY - rect.top)   / DRAW_SIZE
+  };
 }
 
 dc.addEventListener('pointerdown', e => {
@@ -170,40 +183,39 @@ dc.addEventListener('pointerdown', e => {
 dc.addEventListener('pointermove', e => {
   if (!isDrawing) return;
   curStroke.push(getPos(e));
-  redrawStrokes();
+  redrawDrawCanvas();
+  // draw live current stroke on top
   dctx.strokeStyle = '#fff';
-  dctx.lineWidth   = 2;
+  dctx.lineWidth   = 3;
   dctx.lineCap     = 'round';
   dctx.lineJoin    = 'round';
   dctx.beginPath();
-  dctx.moveTo(curStroke[0].x, curStroke[0].y);
-  for (let i = 1; i < curStroke.length; i++) dctx.lineTo(curStroke[i].x, curStroke[i].y);
+  dctx.moveTo(curStroke[0].x * DRAW_SIZE, curStroke[0].y * DRAW_SIZE);
+  for (let i = 1; i < curStroke.length; i++) {
+    dctx.lineTo(curStroke[i].x * DRAW_SIZE, curStroke[i].y * DRAW_SIZE);
+  }
   dctx.stroke();
 });
 dc.addEventListener('pointerup', () => {
   if (curStroke && curStroke.length) strokes.push(curStroke);
   curStroke = null;
   isDrawing = false;
-  redrawStrokes();
+  redrawDrawCanvas();
 });
 
-document.getElementById('btn-undo').onclick  = () => { strokes.pop(); redrawStrokes(); };
+document.getElementById('btn-undo').onclick  = () => { strokes.pop(); redrawDrawCanvas(); };
 document.getElementById('btn-clear').onclick = () => { strokes = []; clearDraw(); };
 document.getElementById('btn-done').onclick  = () => {
-  if (pending) {
-    const off = document.createElement('canvas');
-    off.width  = dc.width;
-    off.height = dc.height;
-    off.getContext('2d').drawImage(dc, 0, 0);
-    drawings[pending] = off;
+  if (pending && strokes.length > 0) {
+    drawings[pending] = strokes.slice(); // save normalised strokes
   }
   overlay.classList.remove('active');
   pending = null;
 };
 
 function openDraw(name) {
-  pending  = name;
-  strokes  = [];
+  pending = name;
+  strokes = [];
   clearDraw();
   document.getElementById('draw-name').textContent = name;
   overlay.classList.add('active');
@@ -246,7 +258,7 @@ function render() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
 
-  // Camera offset: player tile centred on screen
+  // Camera: player tile always centred on screen
   const offX = W / 2 - player.x * TILE - TILE / 2;
   const offY = H / 2 - player.y * TILE - TILE / 2;
 
@@ -270,6 +282,9 @@ function render() {
   }
 
   // Entities
+  const pad = 6;
+  const drawSize = TILE - pad * 2;
+
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       const cell = world[r][c];
@@ -277,32 +292,31 @@ function render() {
 
       const sx = c * TILE;
       const sy = r * TILE;
-      const cx = sx + TILE / 2;
-      const cy = sy + TILE / 2;
 
       if (!cell.discovered) {
         ctx.font         = `${Math.floor(TILE * 0.32)}px Courier New`;
         ctx.fillStyle    = '#1c1c1c';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('?', cx, cy);
+        ctx.fillText('?', sx + TILE / 2, sy + TILE / 2);
       } else if (drawings[cell.thing]) {
-        const pad = 5;
+        // Render normalised strokes directly at tile scale — always sharp
         ctx.save();
-        ctx.globalAlpha = 0.92;
-        ctx.drawImage(drawings[cell.thing], sx + pad, sy + pad, TILE - pad * 2, TILE - pad * 2);
+        ctx.translate(sx + pad, sy + pad);
+        renderStrokes(drawings[cell.thing], ctx, drawSize, Math.max(1, drawSize * 0.03));
         ctx.restore();
       } else {
+        // Discovered, type known, drawing skipped (hit done with no strokes)
         ctx.font         = `${Math.floor(TILE * 0.16)}px Courier New`;
         ctx.fillStyle    = '#282828';
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(cell.thing, cx, cy);
+        ctx.fillText(cell.thing, sx + TILE / 2, sy + TILE / 2);
       }
     }
   }
 
-  // Player marker — crosshair circle
+  // Player marker
   const px = player.x * TILE + TILE / 2;
   const py = player.y * TILE + TILE / 2;
   const pr = 10;
