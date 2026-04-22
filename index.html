@@ -121,11 +121,13 @@
 
 <script>
 // ── CONFIG ──────────────────────────────────────────────────────────────────
-const TILE  = 32;
-const COLS  = 25;
-const ROWS  = 18;
-const W     = TILE * COLS;
-const H     = TILE * ROWS;
+const TILE  = 80;   // large enough to see drawings clearly
+const COLS  = 40;   // world size (bigger than screen — camera scrolls)
+const ROWS  = 30;
+const VW    = Math.floor(window.innerWidth  / TILE) | 0;  // visible tiles
+const VH    = Math.floor(window.innerHeight / TILE) | 0;
+const W     = VW * TILE;
+const H     = VH * TILE;
 
 const THINGS = [
   'rat', 'goblin', 'chest', 'mushroom', 'well',
@@ -139,11 +141,11 @@ gc.width  = W;
 gc.height = H;
 
 // ── STATE ────────────────────────────────────────────────────────────────────
-const drawings = {};   // thing name → ImageData (or null)
-const world    = [];   // [row][col] = { thing: string|null, discovered: bool }
-let   player   = { x: 12, y: 8 };
-let   pending  = null; // thing name waiting to be drawn
-let   keys     = {};
+const drawings    = {};   // thing name → offscreen Canvas (cached, ready to drawImage)
+const world       = [];   // [row][col] = { thing: string|null, discovered: bool }
+let   player      = { x: Math.floor(COLS/2), y: Math.floor(ROWS/2) };
+let   pending     = null; // thing name waiting to be drawn
+let   keys        = {};
 
 // Build world grid
 for (let r = 0; r < ROWS; r++) {
@@ -155,11 +157,11 @@ for (let r = 0; r < ROWS; r++) {
 
 // Scatter things
 function scatter() {
-  const pool = [...THINGS, ...THINGS, ...THINGS]; // duplicates ok
-  for (let i = 0; i < 28; i++) {
+  const pool = [...THINGS, ...THINGS, ...THINGS, ...THINGS];
+  for (let i = 0; i < 60; i++) {
     const r = 1 + Math.floor(Math.random() * (ROWS - 2));
     const c = 1 + Math.floor(Math.random() * (COLS - 2));
-    if (r === player.y && c === player.x) continue;
+    if (Math.abs(r - player.y) < 2 && Math.abs(c - player.x) < 2) continue;
     world[r][c].thing = pool[Math.floor(Math.random() * pool.length)];
   }
 }
@@ -233,9 +235,13 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   clearDrawCanvas();
 });
 document.getElementById('btn-done').addEventListener('click', () => {
-  // Save drawing as ImageData
   if (pending) {
-    drawings[pending] = dctx.getImageData(0, 0, dc.width, dc.height);
+    // Cache as an offscreen canvas — drawImage from canvas is fast and scales cleanly
+    const off = document.createElement('canvas');
+    off.width  = dc.width;
+    off.height = dc.height;
+    off.getContext('2d').drawImage(dc, 0, 0);
+    drawings[pending] = off;
   }
   closeDrawOverlay();
 });
